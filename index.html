@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Runner — Cow Character</title>
+  <meta name="description" content="Chrome Dino–style runner with a custom 2‑frame cow sprite.">
+  <style>
+    :root { --bg:#fff; --ink:#111; }
+    * { box-sizing:border-box; }
+    html, body { height:100%; }
+    body {
+      margin:0; background:var(--bg); color:var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      display:grid; place-items:center;
+    }
+    .wrap { width:min(900px,94vw); padding:16px; }
+    .card { background:#fff; border:1px solid #e6e6e6; border-radius:16px; box-shadow:0 6px 30px rgba(0,0,0,.06); padding:16px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .controls { font-size:13px; color:#555; }
+    .stat { font-variant-numeric: tabular-nums; }
+    button { appearance:none; border:1px solid #ddd; background:#fafafa; padding:8px 12px; border-radius:999px; cursor:pointer; font-size:14px; }
+    button:hover { background:#f2f2f2; }
+    .stage { width:100%; aspect-ratio:16/5; border:1px solid #eee; border-radius:12px; overflow:hidden; background:#fff; position:relative; }
+    canvas { width:100%; height:100%; display:block; }
+    .overlay { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; font-weight:600; color:#444; text-align:center; line-height:1.3; text-shadow:0 1px 0 #fff; }
+    .small { font-weight:400; color:#666; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <header>
+        <h1>Runner — Cow Character</h1>
+        <div class="row">
+          <div class="controls">Space/Tap: Jump · P: Pause</div>
+          <button id="resetBtn">Restart</button>
+        </div>
+      </header>
+      <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+        <div class="stat">Score: <span id="score">00000</span> · High: <span id="hiscore">00000</span></div>
+        <div class="small">The game uses a 2‑frame horizontal sprite automatically.</div>
+      </div>
+      <div class="stage">
+        <canvas id="game" width="960" height="300" aria-label="Runner"></canvas>
+        <div id="msg" class="overlay"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  const lerp=(a,b,t)=>a+(b-a)*t, clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const cvs=document.getElementById('game'), ctx=cvs.getContext('2d');
+  const scoreEl=document.getElementById('score'), hiEl=document.getElementById('hiscore');
+  const overlay=document.getElementById('msg'), resetBtn=document.getElementById('resetBtn');
+  function fitCanvas(){ const r=Math.max(1,Math.floor(window.devicePixelRatio||1)); const w=cvs.clientWidth*r, h=cvs.clientHeight*r; if(cvs.width!==w||cvs.height!==h){ cvs.width=w; cvs.height=h; } }
+  new ResizeObserver(()=>fitCanvas()).observe(cvs); fitCanvas();
+
+  const GROUND_Y=0.8, GRAVITY=2500, JUMP_V=920, BASE_SPEED=420, ACCEL=0.28;
+
+  let spriteImg=new Image(); spriteImg.src="./assets/char_run.png";
+  let spriteReady=false; spriteImg.onload=()=>{ spriteReady=true; };
+  function drawPlayerSprite(p){
+    if(!spriteReady){ drawFallback(p); return; }
+    const frames=2, frameW=spriteImg.width/frames, frameH=spriteImg.height;
+    const scale=p.h/frameH;
+    const step=p.onGround ? (Math.floor(p.frame)%2) : 0;
+    const sx=step*frameW, sy=0;
+    ctx.imageSmoothingEnabled=false;
+    ctx.drawImage(spriteImg, sx, sy, frameW, frameH, p.x, p.y, frameW*scale, frameH*scale);
+  }
+  function drawFallback(p){
+    ctx.fillStyle='#111';
+    const x=p.x,y=p.y,w=p.w,h=p.h;
+    ctx.fillRect(x,y+h*0.2,w*0.8,h*0.6);
+    ctx.fillRect(x+w*0.6,y,w*0.44,h*0.36);
+    ctx.clearRect(x+w*0.9,y+h*0.08,3,3);
+    const legY=y+h*0.8; const step=p.onGround?(p.frame%2):0;
+    if(step===0){ ctx.fillRect(x+w*0.1,legY,w*0.18,h*0.2); ctx.fillRect(x+w*0.5,legY,w*0.18,h*0.2); }
+    else { ctx.fillRect(x+w*0.2,legY,w*0.18,h*0.2); ctx.fillRect(x+w*0.45,legY,w*0.18,h*0.2); }
+  }
+
+  let state;
+  const HiKey='runner_hiscore_cow_en_v1';
+  let hiScore=Number(localStorage.getItem(HiKey)||0); hiEl.textContent=String(hiScore).padStart(5,'0');
+  function groundY(){ return cvs.height*GROUND_Y; }
+  function reset(){
+    state={ running:false, paused:false, t:0, speed:BASE_SPEED, score:0,
+      player:{ x:120, y:0, vy:0, w:44, h:48, frame:0, onGround:true },
+      groundX:0, obstacles:[], clouds:[], lastSpawn:0, night:false };
+    state.player.y = groundY() - state.player.h;
+    overlay.innerHTML='<div>Press Space or Tap to Start</div>';
+  }
+
+  function dpr(){ return Math.max(1,Math.floor(window.devicePixelRatio||1)); }
+  function drawGround(){ const y=groundY(), dash=14, gap=10; ctx.strokeStyle='#222'; ctx.lineWidth=2*dpr(); ctx.setLineDash([dash,gap]); ctx.lineDashOffset=-state.groundX%(dash+gap); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(cvs.width,y); ctx.stroke(); ctx.setLineDash([]); }
+  function drawCloud(c){ ctx.fillStyle='#bbb'; const x=c.x,y=c.y,r=c.r; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.arc(x+r*0.8,y+r*0.2,r*0.8,0,Math.PI*2); ctx.arc(x-r*0.8,y+r*0.2,r*0.9,0,Math.PI*2); ctx.fill(); }
+  function drawCactus(o){ ctx.fillStyle='#111'; const x=o.x,y=o.y,w=o.w,h=o.h; ctx.fillRect(x+w*0.4,y-h,w*0.2,h); ctx.fillRect(x,y-h*0.55,w*0.4,h*0.15); ctx.fillRect(x+w*0.6,y-h*0.35,w*0.4,h*0.15); ctx.fillRect(x,y-h*0.9,w*0.15,h*0.35); ctx.fillRect(x+w*0.85,y-h*0.7,w*0.15,h*0.35); }
+
+  function spawnCloud(){ state.clouds.push({ x:cvs.width+40, y:Math.random()*(cvs.height*0.25)+cvs.height*0.1, r:Math.random()*(26-10)+10, v:Math.random()*(40-15)+15 }); }
+  function spawnCactus(){ const y=groundY(), s=Math.random()*(1.3-0.8)+0.8; state.obstacles.push({ x:cvs.width+Math.random()*40, y, w:34*s, h:60*s }); }
+
+  let wantJump=false;
+  window.addEventListener('keydown',e=>{ if(e.code==='Space'){ e.preventDefault(); tap(); } if(e.key.toLowerCase()==='p') togglePause(); },{passive:false});
+  cvs.addEventListener('pointerdown',()=>tap());
+  resetBtn.addEventListener('click',()=>reset());
+  function tap(){ if(!state.running && !state.paused){ state.running=true; overlay.textContent=''; return; } if(state.paused) return; wantJump=true; }
+  function togglePause(){ state.paused=!state.paused; overlay.innerHTML=state.paused?'<div>Paused · Press P to resume</div>':''; }
+
+  function aabb(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y && a.y + a.h > b.y - b.h; }
+  function update(dt){
+    if(!state.running || state.paused) return;
+    state.t += dt; state.speed += ACCEL * dt * 10;
+    if(Math.random()<0.01) spawnCloud(); for(const c of state.clouds){ c.x -= c.v*dt; } state.clouds = state.clouds.filter(c=>c.x>-80);
+    state.groundX += state.speed*dt;
+    state.lastSpawn -= dt;
+    const minGap = lerp(280, 420, clamp((800 - state.speed)/800, 0, 1));
+    if(state.lastSpawn<=0){ spawnCactus(); state.lastSpawn = (minGap + (Math.random()*100-60)) / state.speed; }
+    for(const o of state.obstacles){ o.x -= state.speed*dt; } state.obstacles = state.obstacles.filter(o=>o.x+o.w>-10);
+    const p=state.player;
+    if(wantJump && p.onGround){ p.vy=-JUMP_V; p.onGround=false; } wantJump=false;
+    p.vy += GRAVITY*dt; p.y += p.vy*dt;
+    const gy=groundY(); if(p.y+p.h>=gy){ p.y=gy-p.h; p.vy=0; p.onGround=true; }
+    if(p.onGround){ p.frame += dt * clamp(state.speed/120, 6, 16); }
+    for(const o of state.obstacles){ if(aabb({x:p.x,y:p.y,w:p.w,h:p.h}, o)){ gameOver(); break; } }
+    state.score += dt * Math.floor(state.speed/10);
+    scoreEl.textContent = String(Math.floor(state.score)).padStart(5,'0');
+    if(state.score > +localStorage.getItem(HiKey)||0){ localStorage.setItem(HiKey, Math.floor(state.score)); hiEl.textContent=String(Math.floor(state.score)).padStart(5,'0'); }
+  }
+  function gameOver(){ state.running=false; overlay.innerHTML='<div>Game Over<br><span class="small">Click/Space to play again</span></div>'; state.obstacles.length=0; state.lastSpawn=0.6; state.speed=BASE_SPEED; const p=state.player; p.vy=0; p.onGround=true; p.y=groundY()-p.h; }
+  function render(){ ctx.clearRect(0,0,cvs.width,cvs.height); ctx.fillStyle=state.night?'#f7f7f7':'#ffffff'; ctx.fillRect(0,0,cvs.width,cvs.height); for(const c of state.clouds){ drawCloud(c); } drawGround(); for(const o of state.obstacles){ drawCactus(o); } drawPlayerSprite(state.player); }
+
+  let last=performance.now();
+  function loop(now){ fitCanvas(); const dt=Math.max(0,Math.min((now-last)/1000,0.05)); last=now; update(dt); render(); requestAnimationFrame(loop); }
+  setInterval(()=>{ if(state?.running) state.night=!state.night; }, 30000);
+  reset(); requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
